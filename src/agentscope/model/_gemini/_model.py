@@ -103,6 +103,55 @@ def _is_null_schema(schema: Any) -> bool:
     )
 
 
+def _items_schema_for_prefix_items(
+    prefix_items: list[Any],
+    existing_items: Any,
+) -> dict[str, Any] | None:
+    """Build a Gemini ``items`` schema from positional element schemas.
+
+    Gemini cannot describe a different schema for each array position.
+    The result accepts any of the ``prefixItems`` schemas, and an
+    existing ``items`` schema is included so elements after the prefix
+    stay allowed. Identical alternatives are collapsed. An empty
+    schema means at least one element is unconstrained.
+
+    Args:
+        prefix_items (`list[Any]`):
+            Positional element schemas from ``prefixItems``.
+        existing_items (`Any`):
+            The schema's current ``items`` value, when present.
+            ``False`` rejects extra elements and is ignored.
+
+    Returns:
+        `dict[str, Any] | None`:
+            The ``items`` schema, or ``None`` when no element schema
+            can be represented.
+    """
+    alternatives: list[Any] = [
+        _sanitize_schema_for_gemini(item) for item in prefix_items
+    ]
+    if isinstance(existing_items, dict):
+        alternatives.append(_sanitize_schema_for_gemini(existing_items))
+    elif isinstance(existing_items, list):
+        alternatives.extend(
+            _sanitize_schema_for_gemini(item) for item in existing_items
+        )
+    elif existing_items is True:
+        return {}
+
+    unique: list[dict[str, Any]] = []
+    for item in alternatives:
+        if item == {}:
+            return {}
+        if isinstance(item, dict) and item not in unique:
+            unique.append(item)
+    if len(unique) == 1:
+        return unique[0]
+    if unique:
+        return {"anyOf": unique}
+    return None
+
+
 def _sanitize_schema_for_gemini(schema: Any) -> Any:
     """Sanitize a JSON schema to be compatible with the Gemini API.
 
@@ -127,6 +176,11 @@ def _sanitize_schema_for_gemini(schema: Any) -> Any:
       the single non-null type. If there is exactly one non-null
       alternative it is inlined directly; otherwise the ``anyOf`` is
       kept but the null entry is dropped.
+    - ``prefixItems``: replaced with an ``items`` schema that accepts
+      any of the positional element types. ``minItems`` and
+      ``maxItems`` are kept. Gemini's ``Schema`` model has ``items``
+      but not ``prefixItems``, which Pydantic emits for fixed-length
+      tuples. Positional checks stay on the original tool schema.
     - All nested sub-schemas (``properties``, ``items``, ``$defs``,
       etc.) are processed recursively.
 
@@ -203,6 +257,22 @@ def _sanitize_schema_for_gemini(schema: Any) -> Any:
                 "and anyOf.",
             )
         schema["anyOf"] = schema.pop("oneOf")
+
+    # Gemini's Schema model accepts `items` but not `prefixItems`, which
+    # Pydantic emits for fixed-length tuples. Represent every position
+    # with one items schema and keep minItems/maxItems. The tool's
+    # original schema still validates each position.
+    prefix_items = schema.pop("prefixItems", None)
+    if isinstance(prefix_items, list) and prefix_items:
+        items_schema = _items_schema_for_prefix_items(
+            prefix_items,
+            schema.get("items"),
+        )
+        if items_schema is None:
+            if not isinstance(schema.get("items"), dict):
+                schema.pop("items", None)
+        else:
+            schema["items"] = items_schema
 
     # Simplify anyOf that only differs by a null type, e.g. Optional[X]
     if "anyOf" in schema and isinstance(schema["anyOf"], list):

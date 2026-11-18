@@ -1911,6 +1911,131 @@ class TestGeminiSchemaUtils(unittest.TestCase):
         self.assertIn("anyOf", pet)
         FunctionDeclaration(name="pet", parameters=result)
 
+    def test_sanitize_fixed_length_tuple_builds_function_declaration(
+        self,
+    ) -> None:
+        """prefixItems from a fixed-length tuple becomes items for Gemini."""
+
+        class PairArgs(BaseModel):
+            """Tool parameters containing a fixed-length tuple."""
+
+            pair: tuple[int, str]
+
+        raw = PairArgs.model_json_schema()
+        original = copy.deepcopy(raw)
+        parameters = _sanitize_schema_for_gemini(
+            _flatten_json_schema(raw),
+        )
+        self.assertEqual(raw, original)
+
+        pair = parameters["properties"]["pair"]
+        self.assertNotIn("prefixItems", pair)
+        self.assertEqual(pair["type"], "array")
+        self.assertEqual(pair["minItems"], 2)
+        self.assertEqual(pair["maxItems"], 2)
+        self.assertEqual(
+            pair["items"],
+            {
+                "anyOf": [
+                    {"type": "integer"},
+                    {"type": "string"},
+                ],
+            },
+        )
+        FunctionDeclaration(name="pair", parameters=parameters)
+
+        class SameArgs(BaseModel):
+            """Tool parameters containing a homogeneous tuple."""
+
+            pair: tuple[int, int]
+
+        same_parameters = _sanitize_schema_for_gemini(
+            _flatten_json_schema(SameArgs.model_json_schema()),
+        )
+        same = same_parameters["properties"]["pair"]
+        self.assertNotIn("prefixItems", same)
+        self.assertEqual(same["items"], {"type": "integer"})
+        self.assertEqual(same["minItems"], 2)
+        self.assertEqual(same["maxItems"], 2)
+        FunctionDeclaration(name="same", parameters=same_parameters)
+
+        class NestedArgs(BaseModel):
+            """Parameters with nested, repeated, and optional tuples."""
+
+            nested: tuple[tuple[int, str], bool]
+            labels: list[tuple[int, str]]
+            maybe: tuple[int, str] | None = None
+
+        nested_parameters = _sanitize_schema_for_gemini(
+            _flatten_json_schema(NestedArgs.model_json_schema()),
+        )
+        self.assertNotIn("prefixItems", json.dumps(nested_parameters))
+        nested = nested_parameters["properties"]["nested"]
+        self.assertEqual(
+            nested["items"],
+            {
+                "anyOf": [
+                    {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "items": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "string"},
+                            ],
+                        },
+                    },
+                    {"type": "boolean"},
+                ],
+            },
+        )
+        maybe = nested_parameters["properties"]["maybe"]
+        self.assertNotIn("prefixItems", maybe)
+        self.assertEqual(
+            maybe["items"],
+            {
+                "anyOf": [
+                    {"type": "integer"},
+                    {"type": "string"},
+                ],
+            },
+        )
+        self.assertNotIn("anyOf", maybe)
+        FunctionDeclaration(name="nested", parameters=nested_parameters)
+
+        with_extra = _sanitize_schema_for_gemini(
+            {
+                "type": "object",
+                "properties": {
+                    "values": {
+                        "type": "array",
+                        "prefixItems": [
+                            {"type": "integer"},
+                            {"type": "string"},
+                        ],
+                        "items": False,
+                        "minItems": 2,
+                        "maxItems": 2,
+                    },
+                },
+            },
+        )
+        values = with_extra["properties"]["values"]
+        self.assertNotIn("prefixItems", values)
+        self.assertEqual(
+            values["items"],
+            {
+                "anyOf": [
+                    {"type": "integer"},
+                    {"type": "string"},
+                ],
+            },
+        )
+        self.assertEqual(values["minItems"], 2)
+        self.assertEqual(values["maxItems"], 2)
+        FunctionDeclaration(name="values", parameters=with_extra)
+
     def test_sanitize_converts_const_to_enum(self) -> None:
         """`const` is converted into a single-value `enum` for Gemini."""
         self.assertEqual(
